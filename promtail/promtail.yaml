@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: promtail
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: promtail
+  template:
+    metadata:
+      labels:
+        app: promtail
+    spec:
+      containers:
+      - name: promtail
+        image: grafana/promtail:2.9.0
+        args:
+          - "-config.file=/etc/promtail/config.yml"
+        volumeMounts:
+        - name: promtail-config
+          mountPath: /etc/promtail/config.yml
+          subPath: config.yml
+        - name: docker-logs
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+      volumes:
+      - name: promtail-config
+        configMap:
+          name: promtail-config
+      - name: docker-logs
+        hostPath:
+          path: /var/lib/docker/containers
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: monitoring
+data:
+  config.yml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+
+    positions:
+      filename: /tmp/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: docker
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: docker-logs
+              __path__: /var/lib/docker/containers/*/*-json.log
