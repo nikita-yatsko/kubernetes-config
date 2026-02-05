@@ -1,3 +1,4 @@
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,21 +15,52 @@ spec:
         app: tempo
     spec:
       containers:
-      - name: tempo
-        image: grafana/tempo:latest
-        args:
-          - "-config.file=/etc/tempo.yml"
-        ports:
-        - containerPort: 3200
-        - containerPort: 4318
-        volumeMounts:
-        - name: tempo-config
-          mountPath: /etc/tempo.yml
-          subPath: tempo.yml
+        - name: tempo
+          image: grafana/tempo:2.8.0          # ← pin version!
+          args:
+            - "-config.file=/etc/tempo/tempo.yml"
+          ports:
+            - name: http
+              containerPort: 3200
+            - name: otlp-http
+              containerPort: 4318
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
       volumes:
-      - name: tempo-config
-        configMap:
-          name: tempo-config
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: tempo-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempo-data
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi          
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -47,11 +79,22 @@ data:
             http:
               endpoint: 0.0.0.0:4318
 
+    ingester:
+      trace_idle_period: 10s
+      max_block_duration: 30m      
+      max_block_bytes: 500000000   
+
+    compactor:
+      compaction:
+        block_retention: 168h     
+
     storage:
       trace:
         backend: local
         local:
-          path: /tmp/tempo
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
 ---
 apiVersion: v1
 kind: Service
@@ -62,10 +105,9 @@ spec:
   selector:
     app: tempo
   ports:
-  - name: http
-    port: 3200
-    targetPort: 3200
-  - name: otlp-http
-    port: 4318
-    targetPort: 4318
-
+    - name: http
+      port: 3200
+      targetPort: 3200
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
