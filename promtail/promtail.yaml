@@ -1,4 +1,32 @@
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail-sa
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: promtail-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "services", "pods", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: promtail-binding
+subjects:
+  - kind: ServiceAccount
+    name: promtail-sa
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: promtail-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: promtail-config
@@ -18,13 +46,21 @@ data:
     scrape_configs:
       - job_name: kubernetes-pods
         pipeline_stages:
-        static_configs:
-          - targets:
-              - localhost
-            labels:
-              job: kubernetes-pods
-              __path__: /var/log/containers/*log
+          - docker: {}
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
 
+          - source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+            separator: /
+            target_label: __path__
+            replacement: /var/log/pods/*$1/$2/*.log
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -40,31 +76,45 @@ spec:
       labels:
         app: promtail
     spec:
-      serviceAccountName: default
+      serviceAccountName: promtail-sa
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
       containers:
         - name: promtail
-          image: grafana/promtail:2.9.0
+          image: grafana/promtail:2.9.1
           args:
-            - "-config.file=/etc/promtail/promtail.yaml"
+            - -config.file=/etc/promtail/promtail.yaml
+            - -log.level=debug
+          env:
+            - name: 'HOSTNAME'
+              valueFrom:
+                fieldRef:
+                  fieldPath: 'spec.nodeName'
+          ports:
+            - containerPort: 9080
+              name: http-metrics
           volumeMounts:
-            - name: config
-              mountPath: /etc/promtail
             - name: varlog
               mountPath: /var/log
-            - name: docker
+              readOnly: true
+            - name: varlibdockercontainers
               mountPath: /var/lib/docker/containers
               readOnly: true
+            - name: promtail-config
+              mountPath: /etc/promtail
             - name: positions
               mountPath: /run/promtail
       volumes:
-        - name: config
-          configMap:
-            name: promtail-config
         - name: varlog
           hostPath:
             path: /var/log
-        - name: docker
+        - name: varlibdockercontainers
           hostPath:
             path: /var/lib/docker/containers
+        - name: promtail-config
+          configMap:
+            name: promtail-config
         - name: positions
           emptyDir: {}
